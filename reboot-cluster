@@ -1,0 +1,60 @@
+#!/bin/bash
+
+#	HPC Instance Manager © 2015 Data Shades
+#	Developed by shane.davis@linkdigital.com.au
+
+#	The MIT License (MIT)
+
+# reboot-cluster: Tags and reboots nodes within the cluster so that their asscoiated DNS etc is updated. 
+
+
+# --------------------------------------------------------------------------
+# Script Defaults
+
+launch_group=cloud-hpc
+az_group=cloud-hpc
+
+# --------------------------------------------------------------------------
+# Script Functionality
+
+# Tell the user what's going to happen
+echo -e "Rebooting Slurm Compute Nodes\r\n"
+
+
+# AWS variables for running CLI commands
+placement=$(wget -q -O - http://169.254.169.254/latest/meta-data/placement/availability-zone)
+region=$(echo ${placement%?})
+
+# Get the tags for this instance
+myid=$(wget -q -O - http://169.254.169.254/latest/meta-data/instance-id)
+tags=$(ec2-describe-tags --region $region --filter "resource-id=$myid")
+
+# Get Production Node AMI - TODO: Use aws ec2 describe-tags and jq
+amitags=$(ec2-describe-tags --region $region --filter "resource-type=image" --filter "value=SLURM-NODE-GM")
+ami_id=$(echo "$amitags" | awk '{print $3}')
+
+# Get the DNS HostedZone so the compute node DNS records can be updated
+zone_id=$(echo "$tags" | grep ZoneID | awk '{print $5}')
+
+# Fixed variables for AWS CLI
+PATH=/sbin:/bin:/usr/sbin:/usr/bin:/opt/aws/bin
+export JAVA_HOME=/usr/lib/jvm/jre
+export EC2_AMITOOL_HOME=/opt/aws/amitools/ec2
+export EC2_HOME=/opt/aws/apitools/ec2
+
+# Find new instances and tag them. TODO: Narrow search to exclude nodes in parallel clusters
+nodenum=1
+instances=$(aws ec2 describe-instances --filters "Name=image-id,Values=${ami_id}" "Name=instance-state-name,Values=running" --region ${region})
+read -a instanceids <<<$(echo $instances | jq '.Reservations[].Instances[].InstanceId')
+
+for instanceid in "${instanceids[@]}"
+        do
+			instid=$(echo ${instanceid} | tr -d '"')
+			echo "Slurm Node ${nodenum} InstanceID: ${instid}"
+			nodename="slurm-node${nodenum}"
+			aws ec2 create-tags --resources ${instid} --tags Key=Name,Value="${nodename}" Key=Role,Value="SLURM-NODE" Key=Version,Value="${launch_group}" Key=DNS,Value="${nodename}.nci.links.com.au" Key=ZoneID,Value="${zone_id}" --region ${region}
+			aws ec2 reboot-instances --instance-ids ${instid} --region ${region}
+			((nodenum++))
+        done
+        
+	
